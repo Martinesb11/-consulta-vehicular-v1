@@ -102,7 +102,6 @@ def crear_driver():
         if d is None:
             raise RuntimeError(f'No se pudo iniciar Chrome. Último error: {ultimo_error}')
 
-    # Timeouts explícitos para el entorno Railway
     d.set_page_load_timeout(PAGELOAD_TIMEOUT)
     d.set_script_timeout(SCRIPT_TIMEOUT)
 
@@ -362,9 +361,11 @@ def resumen_estado_carga(driver):
         ] if m in texto),
     }
 
-def esperar_reporte_completo(driver, timeout=REPORTE_TIMEOUT, estable_s=10):
+def esperar_reporte_completo(driver, timeout=REPORTE_TIMEOUT, estable_s=12):
     inicio = time.time()
-    ultimo, desde_estable, ultimo_log = None, None, 0
+    ultimo = None
+    desde_estable = None
+    ultimo_log = 0
 
     while time.time() - inicio < timeout:
         try:
@@ -376,15 +377,23 @@ def esperar_reporte_completo(driver, timeout=REPORTE_TIMEOUT, estable_s=10):
         ahora = time.time()
 
         if ahora - ultimo_log >= 15:
-            print(f"  {int(ahora-inicio)}s | tablas={estado['tablas']} | modulos={estado['modulos']} | consultando={estado['consultando']}")
+            print(
+                f"  {int(ahora-inicio)}s | tablas={estado['tablas']} | "
+                f"modulos={estado['modulos']} | consultando={estado['consultando']} | "
+                f"texto_len={estado['texto_len']}"
+            )
             ultimo_log = ahora
 
         if estado['modulos'] >= 4 and estado['texto_len'] > 800 and estado['consultando'] == 0:
+            print('✅ Reporte completo detectado por criterio ideal')
+            return True
+
+        if estado['modulos'] >= 4 and estado['texto_len'] > 800:
             if ultimo == estado:
                 if desde_estable is None:
                     desde_estable = ahora
                 elif ahora - desde_estable >= estable_s:
-                    print('✅ Reporte estable y completo')
+                    print('✅ Reporte aceptado por estabilidad aunque consultando no llegue a 0')
                     return True
             else:
                 desde_estable = ahora
@@ -453,7 +462,7 @@ def consultar_placa(driver, placa):
 
     time.sleep(4)
     esperar_documento_listo(driver, 25)
-    esperar_reporte_completo(driver, timeout=REPORTE_TIMEOUT, estable_s=10)
+    esperar_reporte_completo(driver, timeout=REPORTE_TIMEOUT, estable_s=12)
 
 def archivos_en_descargas(driver):
     carpeta = getattr(driver, '_download_dir', os.getcwd())
@@ -484,23 +493,27 @@ def descargar_pdf(driver, placa):
         (By.XPATH, "//button[contains(normalize-space(.), 'Generar')]"),
         (By.XPATH, "//a[contains(normalize-space(.), 'Generar Reporte')]"),
         (By.XPATH, "//button[contains(normalize-space(.), 'Reporte')]"),
+        (By.XPATH, "//a[contains(normalize-space(.), 'Reporte')]"),
         (By.CSS_SELECTOR, 'button.btn-success'),
         (By.CSS_SELECTOR, 'button.btn-primary'),
         (By.CSS_SELECTOR, 'button[download], a[download]'),
     ]
 
-    fin = time.time() + 60
+    print('🔍 Buscando botón de descarga...')
+    fin = time.time() + 90
     btn = None
 
     while time.time() < fin:
         for by, sel in selectores:
             try:
                 for el in driver.find_elements(by, sel):
+                    txt = (el.text or '').strip()
                     if el.is_displayed():
                         disabled = el.get_attribute('disabled') or 'disabled' in (el.get_attribute('class') or '').lower()
+                        print(f'   ↪ candidato botón: texto=[{txt}] disabled={bool(disabled)}')
                         if not disabled:
                             btn = el
-                            print(f'✅ Botón descarga encontrado: [{el.text}]')
+                            print(f'✅ Botón descarga encontrado: [{txt}]')
                             break
                 if btn:
                     break
@@ -508,10 +521,14 @@ def descargar_pdf(driver, placa):
                 pass
         if btn:
             break
-        time.sleep(0.5)
+        time.sleep(1.0)
 
     if not btn:
-        print('❌ No se encontró el botón de descarga')
+        try:
+            texto = driver.find_element(By.TAG_NAME, 'body').text[:2000]
+            print(f'⚠️ No se encontró botón de descarga. Texto visible:\n{texto}')
+        except Exception as e:
+            print(f'⚠️ No se pudo leer texto visible al buscar botón: {e}')
         return None
 
     antes = archivos_en_descargas(driver)
@@ -537,6 +554,7 @@ def descargar_pdf(driver, placa):
         print(f'✅ PDF movido a: {destino}')
         return destino
 
+    print('⚠️ No se descargó ningún PDF luego de presionar el botón')
     return None
 
 def pdf_a_base64(pdf_path):
