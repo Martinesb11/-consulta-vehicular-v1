@@ -15,7 +15,7 @@ USUARIO_CV        = os.environ.get('CV_USUARIO', '')
 CONTRASENA_CV     = os.environ.get('CV_CONTRASENA', '')
 ULTRAMSG_INSTANCE = os.environ.get('ULTRAMSG_INSTANCE', '')
 ULTRAMSG_TOKEN    = os.environ.get('ULTRAMSG_TOKEN', '')
-GRUPO_AUTORIZADO  = '120363406557895449@g.us'
+GRUPO_AUTORIZADO = os.environ.get('GRUPO_AUTORIZADO', '')
 LIMITE_DIARIO     = 15
 
 # ⚠️ ACTUALIZA CON TUS NÚMEROS
