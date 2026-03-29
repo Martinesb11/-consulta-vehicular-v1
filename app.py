@@ -1,71 +1,61 @@
 import os
 import requests
 from flask import Flask, request, jsonify
-from consulta import consultar_vehiculo
 
 app = Flask(__name__)
 
+# ── Variables de entorno ─────────────────────────────────
 ULTRAMSG_TOKEN    = os.environ.get("ULTRAMSG_TOKEN", "")
 ULTRAMSG_INSTANCE = os.environ.get("ULTRAMSG_INSTANCE", "")
-GRUPO_AUTORIZADO  = os.environ.get("GRUPO_AUTORIZADO", "")
-CV_USUARIO        = os.environ.get("CV_USUARIO", "")
-CV_CONTRASENA     = os.environ.get("CV_CONTRASENA", "")
+NUMEROS_AUTORIZADOS = os.environ.get("NUMEROS_AUTORIZADOS", "")
 
 print(f"🚀 Servidor iniciando en puerto 8080")
-print(f"📍 Grupo autorizado: {GRUPO_AUTORIZADO}")
+print(f"📍 Número/Grupo autorizado: {NUMEROS_AUTORIZADOS}")
 
-def enviar_mensaje(chat_id: str, texto: str):
+# ── Enviar mensaje ───────────────────────────────────────
+def enviar_mensaje(numero, mensaje):
     url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/chat"
-    payload = {"token": ULTRAMSG_TOKEN, "to": chat_id, "body": texto}
+    payload = {
+        "token": ULTRAMSG_TOKEN,
+        "to": numero,
+        "body": mensaje
+    }
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"📤 Enviado a {chat_id}: {r.status_code}")
+        print(f"📤 Enviado a {numero}: {r.status_code}")
     except Exception as e:
         print(f"❌ Error al enviar: {e}")
 
+# ── Webhook ──────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
     if not data:
         return jsonify({"status": "ok"})
 
-    msg_data = data.get("data", {})
-    chat_id  = msg_data.get("from", "")
-    body     = msg_data.get("body", "").strip()
-    es_grupo = msg_data.get("isGroupMsg", False)
+    msg_data  = data.get("data", {})
+    from_     = msg_data.get("from", "")
+    body      = msg_data.get("body", "").strip()
+    es_grupo  = msg_data.get("isGroupMsg", False)
 
-    # ── DEBUG: muestra el ID de donde venga el mensaje ──
-    print(f"📨 Mensaje de: [{chat_id}] | Grupo: {es_grupo} | Texto: {body}")
+    # ── DEBUG: captura el ID del grupo ───────────────────
+    print(f"📨 from=[{from_}] | grupo={es_grupo} | texto={body}")
 
+    # Ignorar mensajes propios
     if msg_data.get("fromMe", False):
         return jsonify({"status": "ok"})
 
-    # ── Filtro de grupo autorizado ──
-    if GRUPO_AUTORIZADO and chat_id != GRUPO_AUTORIZADO:
-        print(f"⛔ Ignorado. Origen: {chat_id} | Esperado: {GRUPO_AUTORIZADO}")
-        return jsonify({"status": "ignorado"})
-
-    # ── Comando /placa ──
-    texto_lower = body.lower()
-    if texto_lower.startswith("/placa"):
-        partes = body.split()
-        if len(partes) < 2:
-            enviar_mensaje(chat_id, "⚠️ Uso: /placa ABC123")
-        else:
-            placa = partes[1].strip().upper()
-            enviar_mensaje(chat_id, f"🔍 Consultando placa {placa}...")
-            resultado = consultar_vehiculo(placa, CV_USUARIO, CV_CONTRASENA)
-            enviar_mensaje(chat_id, resultado)
-
-    elif texto_lower in ["/ayuda", "/help"]:
-        enviar_mensaje(chat_id, "🚗 *Bot de Placas*\n\n*/placa* ABC123 — Consulta vehículo\n*/ayuda* — Muestra este menú")
+    # Responder para confirmar que el bot está activo
+    enviar_mensaje(from_, "🤖 Bot activo. El ID de este chat ya aparece en los logs de Railway.")
 
     return jsonify({"status": "ok"})
 
+# ── Health check ─────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "running", "grupo": GRUPO_AUTORIZADO})
+    return jsonify({"status": "running", "autorizado": NUMEROS_AUTORIZADOS})
 
+# ── Main ─────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
