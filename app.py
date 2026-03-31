@@ -11,55 +11,30 @@ from consulta import ejecutar_consulta_completa
 app = Flask(__name__)
 
 # ── Configuración ──────────────────────────────────────────
-USUARIO_CV        = os.environ.get('CV_USUARIO', '').strip()
-CONTRASENA_CV     = os.environ.get('CV_CONTRASENA', '').strip()
-ULTRAMSG_INSTANCE = os.environ.get('ULTRAMSG_INSTANCE', '').strip()
-ULTRAMSG_TOKEN    = os.environ.get('ULTRAMSG_TOKEN', '').strip()
+USUARIO_CV        = os.environ.get('CV_USUARIO', '')
+CONTRASENA_CV     = os.environ.get('CV_CONTRASENA', '')
+ULTRAMSG_INSTANCE = os.environ.get('ULTRAMSG_INSTANCE', '')
+ULTRAMSG_TOKEN    = os.environ.get('ULTRAMSG_TOKEN', '')
+GRUPO_AUTORIZADO  = '120363425191766162@g.us'
+LIMITE_DIARIO     = 15
 
-GRUPO_AUTORIZADO  = os.environ.get('GRUPO_AUTORIZADO', '').strip()
-LIMITE_DIARIO     = int(os.environ.get('LIMITE_DIARIO', '15'))
-CACHE_HORAS       = int(os.environ.get('CACHE_HORAS', '24'))
-
-# ⚠️ ACTUALIZA CON LOS NÚMEROS REALES DEL GRUPO
+# ⚠️ ACTUALIZA CON TUS NÚMEROS
 MIEMBROS = {
     '51982008561': 'Juan',
     '51935203969': 'Alf',
     # '51999999999': 'Nombre',
 }
 
-def validar_config():
-    faltantes = []
-
-    if not USUARIO_CV:
-        faltantes.append('CV_USUARIO')
-    if not CONTRASENA_CV:
-        faltantes.append('CV_CONTRASENA')
-    if not ULTRAMSG_INSTANCE:
-        faltantes.append('ULTRAMSG_INSTANCE')
-    if not ULTRAMSG_TOKEN:
-        faltantes.append('ULTRAMSG_TOKEN')
-    if not GRUPO_AUTORIZADO:
-        faltantes.append('GRUPO_AUTORIZADO')
-
-    if faltantes:
-        raise RuntimeError(
-            f'Faltan variables de entorno obligatorias: {", ".join(faltantes)}'
-        )
-
 # ── Cola de consultas (1 a la vez) ─────────────────────────
 cola = queue.Queue()
 
 def worker():
-    print('🧵 Worker iniciado')
     while True:
         placa, destino, autor = cola.get()
         try:
-            print(f'📥 Procesando | placa={placa} | autor={autor} | cola_restante={cola.qsize()}')
             procesar_consulta(placa, destino, autor)
         except Exception as e:
             print(f'❌ Error en worker: {e}')
-            import traceback
-            traceback.print_exc()
         finally:
             cola.task_done()
 
@@ -67,20 +42,20 @@ hilo_worker = threading.Thread(target=worker, daemon=True)
 hilo_worker.start()
 
 # ── Límite diario por usuario ──────────────────────────────
+# { 'numero': {'fecha': 'YYYY-MM-DD', 'count': N} }
 contadores = {}
 lock_contadores = threading.Lock()
 
 def verificar_limite(numero):
+    """Retorna True si puede consultar, False si alcanzó el límite"""
     hoy = datetime.now().strftime('%Y-%m-%d')
     with lock_contadores:
         datos = contadores.get(numero, {'fecha': hoy, 'count': 0})
-
+        # Resetear si es un nuevo día
         if datos['fecha'] != hoy:
             datos = {'fecha': hoy, 'count': 0}
-
         if datos['count'] >= LIMITE_DIARIO:
             return False
-
         datos['count'] += 1
         contadores[numero] = datos
         return True
@@ -94,90 +69,73 @@ def consultas_restantes(numero):
         return max(0, LIMITE_DIARIO - datos['count'])
 
 # ── Anti-duplicados (caché 24h) ────────────────────────────
+# { 'PLACA': {'timestamp': float, 'pdf_b64': str, 'fecha': str} }
 cache_pdfs = {}
 lock_cache = threading.Lock()
+CACHE_HORAS = 24
 
 def obtener_cache(placa):
+    """Retorna pdf_b64 si está en caché y no expiró, sino None"""
     with lock_cache:
         dato = cache_pdfs.get(placa)
         if not dato:
             return None
-
         horas_pasadas = (time.time() - dato['timestamp']) / 3600
         if horas_pasadas > CACHE_HORAS:
             del cache_pdfs[placa]
             return None
-
         return dato
 
 def guardar_cache(placa, pdf_b64):
     with lock_cache:
         cache_pdfs[placa] = {
             'timestamp': time.time(),
-            'pdf_b64': pdf_b64,
-            'fecha': datetime.now().strftime('%d/%m/%Y %I:%M %p')
+            'pdf_b64':   pdf_b64,
+            'fecha':     datetime.now().strftime('%d/%m/%Y %I:%M %p')
         }
         print(f'💾 Caché guardado para {placa}')
 
 # ── Log de uso ─────────────────────────────────────────────
 def registrar_log(numero, placa, resultado, segundos):
     nombre = MIEMBROS.get(numero, numero)
-    ahora = datetime.now()
-    linea = f"{ahora.strftime('%Y-%m-%d')},{ahora.strftime('%H:%M:%S')},{numero},{nombre},{placa},{resultado},{segundos}\n"
-
+    ahora  = datetime.now()
+    linea  = f"{ahora.strftime('%Y-%m-%d')},{ahora.strftime('%H:%M:%S')},{numero},{nombre},{placa},{resultado},{segundos}\n"
     try:
-        with open('log_consultas.csv', 'a', encoding='utf-8') as f:
+        with open('log_consultas.csv', 'a') as f:
             f.write(linea)
         print(f'📊 Log: {nombre} | {placa} | {resultado} | {segundos}s')
     except Exception as e:
-        print(f'❌ Error en log: {e}')
+        print(f'Error en log: {e}')
 
 # ── Envío de mensajes ──────────────────────────────────────
 def enviar_mensaje(destino, texto):
     try:
         r = requests.post(
             f'https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/chat',
-            data={
-                'token': ULTRAMSG_TOKEN,
-                'to': destino,
-                'body': texto
-            },
+            data={'token': ULTRAMSG_TOKEN, 'to': destino, 'body': texto},
             timeout=30
         )
         print(f'✅ Mensaje enviado: {r.status_code}')
-        if r.status_code not in [200, 201]:
-            print(f'⚠️ UltraMsg chat body: {r.text}')
-        return r.status_code in [200, 201]
     except Exception as e:
         print(f'❌ Error enviando mensaje: {e}')
-        import traceback
-        traceback.print_exc()
-        return False
 
 def enviar_pdf_b64(destino, pdf_b64, placa, autor_numero, desde_cache=False):
     try:
         nombre_autor = MIEMBROS.get(autor_numero, autor_numero)
-        ahora = datetime.now().strftime('%d/%m/%Y %I:%M %p')
-        cache_tag = '\n⚡ _Resultado en caché_' if desde_cache else ''
-
+        ahora        = datetime.now().strftime('%d/%m/%Y %I:%M %p')
+        cache_tag    = '\n⚡ _Resultado en caché_' if desde_cache else ''
         r = requests.post(
             f'https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/document',
             data={
-                'token': ULTRAMSG_TOKEN,
-                'to': destino,
+                'token':    ULTRAMSG_TOKEN,
+                'to':       destino,
                 'document': f'data:application/pdf;base64,{pdf_b64}',
                 'filename': f'Reporte_{placa}.pdf',
-                'caption': (
-                    f'📄 Reporte vehicular - Placa {placa}\n'
-                    f'🙋 Solicitado por: {nombre_autor}\n'
-                    f'📅 {ahora}{cache_tag}'
-                )
+                'caption':  f'📄 Reporte vehicular - Placa {placa}\n🙋 Solicitado por: {nombre_autor}\n📅 {ahora}{cache_tag}'
             },
             timeout=120
         )
-        print(f'📎 Respuesta UltraMsg documento: {r.status_code}')
-        if r.status_code not in [200, 201]:
-            print(f'⚠️ UltraMsg documento body: {r.text}')
+        print(f'Respuesta UltraMsg: {r.status_code} - {r.text}')
         return r.status_code in [200, 201]
     except Exception as e:
         print(f'❌ ERROR enviando PDF: {e}')
@@ -188,8 +146,8 @@ def enviar_pdf_b64(destino, pdf_b64, placa, autor_numero, desde_cache=False):
 # ── Procesar consulta ──────────────────────────────────────
 def procesar_consulta(placa, destino, autor):
     inicio = time.time()
-    print(f'🚦 Iniciando consulta | placa={placa} | autor={autor}')
 
+    # Verificar caché primero
     cached = obtener_cache(placa)
     if cached:
         print(f'⚡ Placa {placa} encontrada en caché')
@@ -199,35 +157,31 @@ def procesar_consulta(placa, destino, autor):
             enviar_mensaje(destino, f'❌ Error enviando PDF para *{placa}*')
         return
 
+    # Consulta completa
     try:
         pdf_path = ejecutar_consulta_completa(placa, USUARIO_CV, CONTRASENA_CV)
         segundos = int(time.time() - inicio)
-
         if pdf_path and os.path.exists(pdf_path):
-            print(f'✅ PDF generado en: {pdf_path}')
+            print(f'PDF generado en: {pdf_path}')
             time.sleep(2)
-
             with open(pdf_path, 'rb') as f:
                 pdf_b64 = base64.b64encode(f.read()).decode('utf-8')
-
+            # Guardar en caché
             guardar_cache(placa, pdf_b64)
-
+            # Enviar
             if enviar_pdf_b64(destino, pdf_b64, placa, autor):
-                print('✅ PDF enviado exitosamente')
+                print(f'✅ PDF enviado exitosamente')
                 registrar_log(autor, placa, 'exitoso', segundos)
             else:
                 enviar_mensaje(destino, f'❌ Error enviando PDF para *{placa}*')
                 registrar_log(autor, placa, 'error_envio', segundos)
-
             try:
                 os.remove(pdf_path)
-                print(f'🗑️ PDF temporal eliminado: {pdf_path}')
-            except Exception as e:
-                print(f'⚠️ No se pudo borrar PDF temporal: {e}')
+            except:
+                pass
         else:
             enviar_mensaje(destino, f'⚠️ No se pudo generar reporte para *{placa}*.')
             registrar_log(autor, placa, 'sin_pdf', segundos)
-
     except Exception as e:
         segundos = int(time.time() - inicio)
         print(f'❌ Error en procesar_consulta: {e}')
@@ -240,61 +194,55 @@ def procesar_consulta(placa, destino, autor):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.json or {}
+        data     = request.json or {}
         msg_data = data.get('data', {})
 
-        origen = msg_data.get('from')
-        from_me = msg_data.get('fromMe', False)
-        body = (msg_data.get('body') or '').strip().upper()
+        # Solo del grupo autorizado
+        if msg_data.get('from') != GRUPO_AUTORIZADO:
+            print(f'Ignorado (no autorizado): {msg_data.get("from")}')
+            return jsonify({'status': 'ignorado'}), 200
+
+        # Ignorar mensajes propios
+        if msg_data.get('fromMe'):
+            return jsonify({'status': 'ignorado'}), 200
+
+        body  = (msg_data.get('body') or '').strip().upper()
         autor = (msg_data.get('author') or msg_data.get('from', '')).replace('@c.us', '').replace('+', '').strip()
-
-        print(f'📨 Webhook | from={origen} | author={autor} | fromMe={from_me} | body={body}')
-
-        if origen != GRUPO_AUTORIZADO:
-            print(f'⛔ Ignorado (grupo no autorizado): {origen}')
-            return jsonify({'status': 'ignorado'}), 200
-
-        if from_me:
-            print('↩️ Ignorado (mensaje propio)')
-            return jsonify({'status': 'ignorado'}), 200
+        print(f'Mensaje de {autor}: {body}')
 
         if body.startswith('CONSULTA '):
             placa = body.replace('CONSULTA ', '').strip()
-
             if 6 <= len(placa) <= 8:
+                # Verificar límite diario
                 if not verificar_limite(autor):
+                    restantes = consultas_restantes(autor)
                     nombre = MIEMBROS.get(autor, autor)
-                    enviar_mensaje(
-                        GRUPO_AUTORIZADO,
+                    enviar_mensaje(GRUPO_AUTORIZADO,
                         f'🚫 *{nombre}* alcanzaste el límite de {LIMITE_DIARIO} consultas por hoy.\n'
                         f'🔄 Tu contador se resetea a medianoche.'
                     )
                     return jsonify({'status': 'limite_alcanzado'}), 200
 
+                # Agregar a cola
                 posicion = cola.qsize() + 1
-
                 if posicion > 1:
                     tiempo_est = posicion * 5
-                    enviar_mensaje(
-                        GRUPO_AUTORIZADO,
+                    enviar_mensaje(GRUPO_AUTORIZADO,
                         f'📋 Placa *{placa}* añadida a la cola\n'
                         f'⏳ Posición #{posicion} — espera ~{tiempo_est} minutos'
                     )
                 else:
+                    # Verificar caché antes de avisar tiempo de espera
                     cached = obtener_cache(placa)
                     if cached:
-                        enviar_mensaje(
-                            GRUPO_AUTORIZADO,
+                        enviar_mensaje(GRUPO_AUTORIZADO,
                             f'⚡ Placa *{placa}* encontrada en caché, enviando ahora...'
                         )
                     else:
-                        enviar_mensaje(
-                            GRUPO_AUTORIZADO,
+                        enviar_mensaje(GRUPO_AUTORIZADO,
                             f'⏳ Consultando *{placa}*...\nEspera 2-3 minutos.'
                         )
-
                 cola.put((placa, GRUPO_AUTORIZADO, autor))
-                print(f'📌 Encolado | placa={placa} | autor={autor} | cola={cola.qsize()}')
             else:
                 enviar_mensaje(GRUPO_AUTORIZADO, '⚠️ Formato: *CONSULTA ABC123*')
 
@@ -310,22 +258,15 @@ def webhook():
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
-        'status': 'ok',
-        'grupo_configurado': bool(GRUPO_AUTORIZADO),
-        'ultramsg_configurado': bool(ULTRAMSG_INSTANCE and ULTRAMSG_TOKEN),
-        'credenciales_cv_configuradas': bool(USUARIO_CV and CONTRASENA_CV),
+        'status':          'ok',
+        'grupo':           GRUPO_AUTORIZADO,
         'cola_pendientes': cola.qsize(),
-        'cache_items': len(cache_pdfs),
-        'limite_diario': LIMITE_DIARIO
+        'cache_placas':    list(cache_pdfs.keys())
     }), 200
 
 # ── Inicio ─────────────────────────────────────────────────
 if __name__ == '__main__':
-    validar_config()
     port = int(os.environ.get('PORT', 8080))
     print(f'🚀 Servidor iniciando en puerto {port}')
-    print(f'📍 Grupo autorizado configurado: {GRUPO_AUTORIZADO}')
-    print(f'🔐 UltraMsg instance: {ULTRAMSG_INSTANCE}')
-    print(f'👥 Miembros registrados: {len(MIEMBROS)}')
-    print(f'📏 Límite diario: {LIMITE_DIARIO}')
+    print(f'📍 Grupo autorizado: {GRUPO_AUTORIZADO}')
     app.run(host='0.0.0.0', port=port, debug=False)
