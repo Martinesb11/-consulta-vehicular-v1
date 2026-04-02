@@ -14,15 +14,6 @@ URL_BASE     = 'https://www.consultavehicular.services'
 URL_LOGIN    = f'{URL_BASE}/'
 URL_CONSULTA = f'{URL_BASE}/reult2.html'
 
-# ── Configuración de sesión persistente ────────────────────
-MAX_CONSULTAS_POR_SESION = int(os.environ.get('MAX_CONSULTAS_POR_SESION', '20'))
-MAX_MINUTOS_SESION       = int(os.environ.get('MAX_MINUTOS_SESION', '90'))
-MAX_REINTENTOS           = int(os.environ.get('MAX_REINTENTOS', '1'))
-
-driver_global = None
-consultas_desde_login = 0
-hora_ultimo_login = None
-
 def timestamp():
     return datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -35,7 +26,6 @@ def limpiar_campo(txt):
 def crear_driver():
     download_dir = os.path.abspath('descargas_cv')
     os.makedirs(download_dir, exist_ok=True)
-
     base = [
         '--headless=new',
         '--no-sandbox',
@@ -58,9 +48,7 @@ def crear_driver():
         '--safebrowsing-disable-auto-update',
         '--js-flags=--max-old-space-size=256',
     ]
-
     ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-
     prefs = {
         'download.default_directory': download_dir,
         'download.prompt_for_download': False,
@@ -68,7 +56,6 @@ def crear_driver():
         'plugins.always_open_pdf_externally': True,
         'safebrowsing.enabled': True,
     }
-
     def _opts(binary=None):
         opts = Options()
         for a in base:
@@ -80,7 +67,6 @@ def crear_driver():
         if binary:
             opts.binary_location = binary
         return opts
-
     try:
         d = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=_opts())
     except Exception:
@@ -92,7 +78,6 @@ def crear_driver():
                 continue
         else:
             raise RuntimeError('No se pudo iniciar Chrome.')
-
     try:
         d.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': """
@@ -104,12 +89,10 @@ def crear_driver():
         })
     except Exception:
         pass
-
     try:
         d.execute_cdp_cmd('Page.setDownloadBehavior', {'behavior': 'allow', 'downloadPath': download_dir})
     except Exception:
         pass
-
     d._download_dir = download_dir
     return d
 
@@ -215,29 +198,28 @@ def hacer_login(driver, usuario, contrasena):
         (By.CSS_SELECTOR, 'input[type="email"]'),
         (By.XPATH, "//input[@placeholder='Correo' or @placeholder='Email' or @placeholder='Usuario']"),
     ], timeout=10, visibles=False)
-
     campo_pass = buscar(driver, [
         (By.CSS_SELECTOR, 'input#password'),
         (By.CSS_SELECTOR, 'input[type="password"]'),
     ], timeout=10, visibles=False)
-
     if not campo_user or not campo_pass:
         raise Exception('No se encontraron los campos de login')
 
     print('Escribiendo credenciales...')
     escribir_humano(driver, campo_user, usuario)
-    print('Usuario ingresado')
+    print(f'Usuario ingresado')
     time.sleep(0.5)
 
+    # Re-buscar por si el DOM se actualizó
     campo_pass = buscar(driver, [
         (By.CSS_SELECTOR, 'input#password'),
         (By.CSS_SELECTOR, 'input[type="password"]'),
     ], timeout=5, visibles=False)
-
     escribir_humano(driver, campo_pass, contrasena)
-    print('Contrasena ingresada')
+    print(f'Contrasena ingresada')
     time.sleep(0.5)
 
+    # Enviar formulario
     enviado = False
     for by, sel in [
         (By.XPATH, "//button[contains(translate(.,'INGRESAR','ingresar'),'ingresar')]"),
@@ -257,7 +239,6 @@ def hacer_login(driver, usuario, contrasena):
                 break
         except Exception:
             pass
-
     if not enviado:
         campo_pass.send_keys(Keys.ENTER)
 
@@ -268,23 +249,15 @@ def hacer_login(driver, usuario, contrasena):
     fin = time.time() + 30
     while time.time() < fin:
         cerrar_alerta_si_existe(driver)
-        try:
-            url_actual = (driver.current_url or '').lower()
-            txt = texto_normalizado(driver.find_element(By.TAG_NAME, 'body').text)
-        except Exception:
-            url_actual = ''
-            txt = ''
-
+        url_actual = (driver.current_url or '').lower()
+        txt = texto_normalizado(driver.find_element(By.TAG_NAME, 'body').text)
         if 'reult2' in url_actual or 'result2' in url_actual:
             print('✅ Login exitoso')
             return
-
         if any(m in txt for m in ['consultar placa', 'reporte vehicular', 'impuesto vehicular']):
             print('✅ Login exitoso')
             return
-
         time.sleep(1.0)
-
     raise Exception(f'Login no confirmado. URL: {driver.current_url}')
 
 def resumen_estado_carga(driver):
@@ -293,28 +266,22 @@ def resumen_estado_carga(driver):
         'texto_len': len(texto),
         'tablas': len(driver.find_elements(By.TAG_NAME, 'table')),
         'consultando': texto.count('consultando papeletas'),
-        'modulos': sum(1 for m in [
-            'soat', 'vehiculo', 'sutran', 'revision tecnica',
-            'impuesto vehicular', 'sat lima', 'sat callao'
-        ] if m in texto),
+        'modulos': sum(1 for m in ['soat', 'vehiculo', 'sutran', 'revision tecnica', 'impuesto vehicular', 'sat lima', 'sat callao'] if m in texto),
     }
 
 def esperar_reporte_completo(driver, timeout=320, estable_s=10):
     inicio = time.time()
     ultimo, desde_estable, ultimo_log = None, None, 0
-
     while time.time() - inicio < timeout:
         try:
             estado = resumen_estado_carga(driver)
         except Exception:
             time.sleep(2)
             continue
-
         ahora = time.time()
         if ahora - ultimo_log >= 15:
             print(f"  {int(ahora-inicio)}s | tablas={estado['tablas']} | modulos={estado['modulos']} | consultando={estado['consultando']}")
             ultimo_log = ahora
-
         if estado['modulos'] >= 4 and estado['texto_len'] > 800 and estado['consultando'] == 0:
             if ultimo == estado:
                 if desde_estable is None:
@@ -325,18 +292,14 @@ def esperar_reporte_completo(driver, timeout=320, estable_s=10):
                 desde_estable = ahora
         else:
             desde_estable = None
-
         ultimo = estado
-
         try:
             driver.execute_script('window.scrollBy(0,500);')
             time.sleep(0.6)
             driver.execute_script('window.scrollBy(0,-120);')
         except Exception:
             pass
-
         time.sleep(2)
-
     return False
 
 def consultar_placa(driver, placa):
@@ -354,13 +317,10 @@ def consultar_placa(driver, placa):
                 break
         except Exception:
             pass
-
     if not campo:
         raise Exception('No se encontro el campo de placa')
-
     escribir_humano(driver, campo, placa)
     time.sleep(0.5)
-
     enviado = False
     for by, sel in [
         (By.XPATH, "//button[contains(translate(.,'CONSULTARBUSCAR','consultarbuscar'),'consultar') or contains(translate(.,'CONSULTARBUSCAR','consultarbuscar'),'buscar')]"),
@@ -377,16 +337,11 @@ def consultar_placa(driver, placa):
                 break
         except Exception:
             pass
-
     if not enviado:
         campo.send_keys(Keys.ENTER)
-
     time.sleep(4)
     esperar_documento_listo(driver, 25)
-
-    ok = esperar_reporte_completo(driver, timeout=320, estable_s=10)
-    if not ok:
-        raise Exception('El reporte no termino de cargar a tiempo')
+    esperar_reporte_completo(driver, timeout=320, estable_s=10)
 
 def archivos_en_descargas(driver):
     carpeta = getattr(driver, '_download_dir', os.getcwd())
@@ -415,7 +370,6 @@ def descargar_pdf(driver, placa):
         (By.CSS_SELECTOR, 'button.btn-primary'),
         (By.CSS_SELECTOR, 'button[download], a[download]'),
     ]
-
     fin = time.time() + 60
     btn = None
     while time.time() < fin:
@@ -435,11 +389,9 @@ def descargar_pdf(driver, placa):
         if btn:
             break
         time.sleep(0.5)
-
     if not btn:
         print('ERROR: No se encontro el boton de descarga')
         return None
-
     antes = archivos_en_descargas(driver)
     try:
         js_click(driver, btn)
@@ -448,7 +400,6 @@ def descargar_pdf(driver, placa):
             btn.send_keys(Keys.ENTER)
         except Exception:
             pass
-
     time.sleep(2)
     pdf = esperar_descarga_pdf(driver, antes, timeout=150)
     if pdf:
@@ -459,154 +410,45 @@ def descargar_pdf(driver, placa):
         except Exception:
             shutil.copy2(pdf, destino)
         return destino
-
     return None
 
 def pdf_a_base64(pdf_path):
     with open(pdf_path, 'rb') as f:
         return base64.b64encode(f.read()).decode('utf-8')
 
-# ── Gestión de sesión persistente ──────────────────────────
-def cerrar_driver_global():
-    global driver_global
-    if driver_global:
-        try:
-            driver_global.quit()
-        except Exception:
-            pass
-    driver_global = None
-
-def sesion_expirada(driver):
-    try:
-        url_actual = (driver.current_url or '').lower()
-        txt = texto_normalizado(driver.find_element(By.TAG_NAME, 'body').text)
-
-        if 'login' in url_actual:
-            return True
-
-        if any(m in txt for m in ['iniciar sesión', 'iniciar sesion', 'ingresar', 'correo', 'contraseña', 'password']):
-            # para evitar falsos positivos, combinamos señales
-            if ('correo' in txt and ('contraseña' in txt or 'password' in txt)) or 'ingresar' in txt:
-                return True
-
-        campo_email = buscar(driver, [
-            (By.CSS_SELECTOR, 'input#email'),
-            (By.CSS_SELECTOR, 'input[type="email"]'),
-        ], timeout=2, visibles=False)
-
-        campo_pass = buscar(driver, [
-            (By.CSS_SELECTOR, 'input#password'),
-            (By.CSS_SELECTOR, 'input[type="password"]'),
-        ], timeout=2, visibles=False)
-
-        if campo_email and campo_pass:
-            return True
-
-        return False
-    except Exception:
-        return True
-
-def pagina_rara(driver):
-    try:
-        txt = texto_normalizado(driver.find_element(By.TAG_NAME, 'body').text)
-        errores = [
-            '502 bad gateway',
-            '500 internal server error',
-            'site can’t be reached',
-            'this site can’t be reached',
-            'no se puede acceder',
-            'error 500',
-            'error 502',
-        ]
-        if any(e in txt for e in errores):
-            return True
-        return False
-    except Exception:
-        return True
-
-def necesita_relogin(driver):
-    global consultas_desde_login, hora_ultimo_login
-
-    if driver is None:
-        print('ℹ️ No hay driver activo')
-        return True
-
-    if consultas_desde_login >= MAX_CONSULTAS_POR_SESION:
-        print(f'♻️ Relogin por limite de consultas ({consultas_desde_login})')
-        return True
-
-    if hora_ultimo_login is not None:
-        minutos = (time.time() - hora_ultimo_login) / 60
-        if minutos >= MAX_MINUTOS_SESION:
-            print(f'♻️ Relogin por tiempo de sesion ({minutos:.1f} min)')
-            return True
-
-    if sesion_expirada(driver):
-        print('♻️ Sesion expirada detectada')
-        return True
-
-    if pagina_rara(driver):
-        print('♻️ Pagina rara detectada')
-        return True
-
-    return False
-
-def asegurar_sesion(usuario, contrasena):
-    global driver_global, consultas_desde_login, hora_ultimo_login
-
-    if not necesita_relogin(driver_global):
-        return driver_global
-
-    cerrar_driver_global()
-
-    print('🚀 Creando nuevo driver global...')
-    driver_global = crear_driver()
-    hacer_login(driver_global, usuario, contrasena)
-
-    consultas_desde_login = 0
-    hora_ultimo_login = time.time()
-
-    return driver_global
-
-# ── Consulta con sesión persistente ────────────────────────
+# ── Consulta: driver nuevo por cada placa ─────────────────
 def ejecutar_consulta_completa(placa, usuario, contrasena):
-    global consultas_desde_login, driver_global
-
     placa      = placa.strip().upper()
     usuario    = usuario.strip()
     contrasena = contrasena.strip()
-
-    for intento in range(MAX_REINTENTOS + 1):
-        try:
-            driver = asegurar_sesion(usuario, contrasena)
-
-            print(f'Consultando placa {placa}...')
-            consultar_placa(driver, placa)
-
-            print('Descargando PDF...')
-            pdf_path = descargar_pdf(driver, placa)
-
-            if pdf_path:
-                consultas_desde_login += 1
-                print(f'✅ PDF listo: {pdf_path}')
-                print(f'📊 Consultas desde login actual: {consultas_desde_login}')
-                return pdf_path
-
-            raise Exception('No se pudo descargar el PDF')
-
-        except Exception as e:
-            print(f'❌ Error en consulta: {e}')
-            import traceback
-            traceback.print_exc()
-
-            if intento < MAX_REINTENTOS:
-                print('🔁 Reintentando con sesión nueva...')
-                cerrar_driver_global()
-                time.sleep(2)
-                continue
-
+    driver     = None
+    try:
+        print(f'🚀 Creando driver para placa {placa}...')
+        driver = crear_driver()
+        hacer_login(driver, usuario, contrasena)
+        print(f'Consultando placa {placa}...')
+        consultar_placa(driver, placa)
+        print('Descargando PDF...')
+        pdf_path = descargar_pdf(driver, placa)
+        if pdf_path:
+            print(f'PDF listo: {pdf_path}')
+            return pdf_path
+        else:
+            print('No se pudo descargar el PDF')
             return None
+    except Exception as e:
+        print(f'❌ Error en consulta: {e}')
+        import traceback
+        traceback.print_exc()
+        return None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+                print(f'🔒 Driver cerrado para {placa}')
+            except Exception:
+                pass
 
 # ── Mantener compatibilidad con app.py ────────────────────
 def inicializar_driver_global():
-    print('ℹ️ Modo sesión persistente activo')
+    print('ℹ️ Modo driver-por-consulta activo (no se usa driver global)')
